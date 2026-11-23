@@ -19,7 +19,7 @@ class ApiConstants {
   static const String login = '/auth/login';
   static const String forgotPassword = '/auth/forgot-password';
   static const String resetPassword = '/auth/reset-password';
-  static const String refreshToken = '/auth/refresh';
+  static const String refreshToken = '/auth/refresh-tokens';
   static const String me = '/auth/me';
 
   // ---------------- Users (المستخدمون) ----------------

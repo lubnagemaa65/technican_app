@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../storage/secure_storage_service.dart';
@@ -16,137 +17,189 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// عميل Dio المركزي للمصادقة والطلبات المحمية.
+///
+/// مسؤولياته:
+/// - إضافة Access Token إلى الطلبات.
+/// - تجديد Access Token مرة واحدة عند انتهاء صلاحيته.
+/// - عدم مسح الجلسة عند أخطاء الشبكة أو توقف الخادم.
+/// - إبلاغ AuthProvider فقط عندما يثبت أن Refresh Token غير صالح.
 class ApiClient {
   ApiClient._() {
-    dio = Dio(BaseOptions(
-      baseUrl: baseUrl,
-      connectTimeout: const Duration(seconds: 15),
-      receiveTimeout: const Duration(seconds: 20),
-      headers: {'Content-Type': 'application/json'},
-    ));
+    dio = Dio(
+      BaseOptions(
+        baseUrl: baseUrl,
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 20),
+        headers: {'Content-Type': 'application/json'},
+      ),
+    );
 
-    dio.interceptors.add(InterceptorsWrapper(
-      onRequest: (options, handler) async {
-        final generation = options.extra
-            .putIfAbsent(_generationKey, () => _sessionGeneration) as int;
-        if (!_isCurrent(options, generation)) {
-          return handler.reject(_staleRequest(options));
-        }
-        try {
-          final token = await _storage.read(key: _accessKey);
+    dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          final generation = options.extra.putIfAbsent(
+            _generationKey,
+            () => _sessionGeneration,
+          ) as int;
+
           if (!_isCurrent(options, generation)) {
             return handler.reject(_staleRequest(options));
           }
-          if (token != null) {
-            options.headers['Authorization'] = 'Bearer $token';
-          } else {
-            options.headers.remove('Authorization');
-          }
-          handler.next(options);
-        } catch (error, stack) {
-          handler.reject(DioException(
-              requestOptions: options, error: error, stackTrace: stack));
-        }
-      },
-      onResponse: (response, handler) {
-        final req = response.requestOptions;
-        if (!_isCurrent(req, req.extra[_generationKey] as int?)) {
-          return handler.reject(_staleRequest(req));
-        }
-        handler.next(response);
-      },
-      onError: (e, handler) async {
-        final req = e.requestOptions;
-        final generation = req.extra[_generationKey] as int?;
-        if (!_isCurrent(req, generation)) {
-          return handler.next(_staleRequest(req));
-        }
-        final isAuthCall = _isAuthCall(req);
-        if (e.response?.statusCode == 401 && !isAuthCall) {
-          if (req.extra['retried'] == true) {
-            _notifyExpired();
-          } else {
-            try {
-              // A late 401 for an old access token can reuse an already
-              // refreshed token, rather than consuming the refresh token twice.
-              final token = await _storage.read(key: _accessKey);
-              if (!_isCurrent(req, generation)) {
-                return handler.next(_staleRequest(req));
-              }
-              final sentToken = req.headers['Authorization'];
-              final alreadyRefreshed = token != null &&
-                  sentToken != null &&
-                  sentToken != 'Bearer $token';
-              final ok = alreadyRefreshed ||
-                  await _refreshOnce(generation!, sentToken?.toString());
-              if (!_isCurrent(req, generation)) {
-                return handler.next(_staleRequest(req));
-              }
-              if (ok) {
-                req.extra['retried'] = true;
-                // onRequest reads the latest token again for the retry.
-                try {
-                  return handler.resolve(await dio.fetch(req));
-                } on DioException catch (err) {
-                  return handler.next(err);
-                }
-              }
-            } on DioException catch (refreshError) {
-              if (!_isCurrent(req, generation)) {
-                return handler.next(_staleRequest(req));
-              }
-              // Connectivity and server errors do not prove the session is
-              // invalid. Return the refresh error so the UI can report it.
-              return handler.next(refreshError);
-            } catch (error, stack) {
-              if (!_isCurrent(req, generation)) {
-                return handler.next(_staleRequest(req));
-              }
-              return handler.next(DioException(
-                  requestOptions: req, error: error, stackTrace: stack));
+
+          try {
+            final token = await _storage.read(key: _accessKey);
+
+            if (!_isCurrent(options, generation)) {
+              return handler.reject(_staleRequest(options));
             }
-            if (_isCurrent(req, generation)) _notifyExpired();
+
+            if (token != null && token.isNotEmpty) {
+              options.headers['Authorization'] = 'Bearer $token';
+            } else {
+              options.headers.remove('Authorization');
+            }
+
+            handler.next(options);
+          } catch (error, stack) {
+            handler.reject(
+              DioException(
+                requestOptions: options,
+                error: error,
+                stackTrace: stack,
+              ),
+            );
           }
-        }
-        handler.next(e);
-      },
-    ));
+        },
+        onResponse: (response, handler) {
+          final request = response.requestOptions;
+          final generation = request.extra[_generationKey] as int?;
+
+          if (!_isCurrent(request, generation)) {
+            return handler.reject(_staleRequest(request));
+          }
+
+          handler.next(response);
+        },
+        onError: (error, handler) async {
+          final request = error.requestOptions;
+          final generation = request.extra[_generationKey] as int?;
+
+          debugPrint(
+            'API ERROR: ${error.response?.statusCode} '
+            '${request.method} ${request.uri}',
+          );
+
+          if (!_isCurrent(request, generation)) {
+            return handler.next(_staleRequest(request));
+          }
+
+          final isAuthCall = _isAuthCall(request);
+          final isUnauthorized = error.response?.statusCode == 401;
+
+          // Login/refresh requests يجب أن تُعاد أخطاؤها مباشرة، ولا يجوز
+          // أن يؤدي فشل تسجيل الدخول إلى استدعاء تسجيل الخروج.
+          if (!isUnauthorized || isAuthCall) {
+            return handler.next(error);
+          }
+
+          // لا نعيد محاولة الطلب أكثر من مرة.
+          if (request.extra['retried'] == true) {
+            _notifyExpired();
+            return handler.next(error);
+          }
+
+          try {
+            // إذا كان طلب آخر قد جدّد التوكن أثناء هذه العملية، نستخدمه
+            // مباشرة ولا نستهلك Refresh Token مرتين.
+            final currentAccessToken = await _storage.read(key: _accessKey);
+
+            if (!_isCurrent(request, generation)) {
+              return handler.next(_staleRequest(request));
+            }
+
+            final sentAuthorization =
+                request.headers['Authorization']?.toString();
+            final alreadyRefreshed =
+                currentAccessToken != null &&
+                sentAuthorization != null &&
+                sentAuthorization != 'Bearer $currentAccessToken';
+
+            final refreshed = alreadyRefreshed ||
+                await _refreshOnce(
+                  generation!,
+                  sentAuthorization,
+                );
+
+            if (!_isCurrent(request, generation)) {
+              return handler.next(_staleRequest(request));
+            }
+
+            if (refreshed) {
+              request.extra['retried'] = true;
+
+              try {
+                // onRequest يقرأ أحدث Access Token تلقائيًا.
+                return handler.resolve(await dio.fetch(request));
+              } on DioException catch (retryError) {
+                return handler.next(retryError);
+              }
+            }
+          } on DioException catch (refreshError) {
+            if (!_isCurrent(request, generation)) {
+              return handler.next(_staleRequest(request));
+            }
+
+            // خطأ الاتصال أو الخادم لا يثبت انتهاء الجلسة؛ نعيد الخطأ
+            // للواجهة بدل مسح بيانات الدخول.
+            return handler.next(refreshError);
+          } catch (refreshError, stack) {
+            if (!_isCurrent(request, generation)) {
+              return handler.next(_staleRequest(request));
+            }
+
+            return handler.next(
+              DioException(
+                requestOptions: request,
+                error: refreshError,
+                stackTrace: stack,
+              ),
+            );
+          }
+
+          // نصل إلى هنا فقط عندما يرفض الخادم Refresh Token فعليًا.
+          if (_isCurrent(request, generation)) {
+            _notifyExpired();
+          }
+
+          handler.next(error);
+        },
+      ),
+    );
   }
 
-  /// يُستدعى عند فشل تجديد الجلسة، لإعادة المستخدم لشاشة الدخول.
+  /// يُستدعى عند ثبوت انتهاء الجلسة.
   static void Function()? onSessionExpired;
   static bool _expiredNotified = false;
 
   static void _notifyExpired() {
     if (_expiredNotified) return;
     _expiredNotified = true;
+
     final callback = onSessionExpired;
     if (callback != null) {
       callback();
     } else {
-      // Even without a UI listener, never leave an expired session usable.
+      // لا نترك جلسة منتهية قابلة للاستخدام حتى لو لم تكن الواجهة جاهزة.
       instance.invalidateSession();
       unawaited(instance._clearExpiredWithoutListener());
     }
   }
 
-  Future<void> _clearExpiredWithoutListener() async {
-    try {
-      await clearTokens();
-    } catch (_) {
-      // Still try the separate profile storage below.
-    }
-    try {
-      await SecureStorageService.instance.clearSession();
-    } catch (_) {
-      // Storage may be unavailable; the in-memory session remains blocked.
-    }
-  }
-
   static final ApiClient instance = ApiClient._();
 
-  // API_BASE_URL takes precedence; API_URL remains supported for older builds.
-  // With neither define, keep the project's existing default unchanged.
+  /// API_BASE_URL هو الخيار الموصى به في GitHub Actions.
+  /// API_URL مدعوم للتوافق مع الإصدارات القديمة.
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
     defaultValue: String.fromEnvironment(
@@ -154,35 +207,41 @@ class ApiClient {
       defaultValue: 'http://192.168.1.66:3000/v1',
     ),
   );
-  static const _accessKey = 'access_token';
-  static const _refreshKey = 'refresh_token';
-  static const _userKey = 'current_user_json';
-  static const _generationKey = 'session_generation';
 
-  // Retain the original storage options so existing ApiClient sessions can
-  // still be restored. Profile storage uses its own configured options.
+  static const String _accessKey = 'access_token';
+  static const String _refreshKey = 'refresh_token';
+  static const String _userKey = 'current_user_json';
+  static const String _generationKey = 'session_generation';
+
+  // تبقى خيارات التخزين متوافقة مع الجلسات السابقة التي أنشأها ApiClient.
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
   late final Dio dio;
+
   Future<bool>? _refreshing;
   int? _refreshGeneration;
   int _sessionGeneration = 0;
   bool _sessionBlocked = false;
   Future<void>? _storageWrites;
 
-  bool _isAuthCall(RequestOptions req) =>
-      Uri.parse(req.path).path.startsWith('/auth/');
+  bool _isAuthCall(RequestOptions request) {
+    final path = Uri.parse(request.path).path;
+    return path.startsWith('/auth/');
+  }
 
-  bool _isCurrent(RequestOptions req, int? generation) =>
-      generation == _sessionGeneration &&
-      (!_sessionBlocked || _isAuthCall(req));
+  bool _isCurrent(RequestOptions request, int? generation) {
+    return generation == _sessionGeneration &&
+        (!_sessionBlocked || _isAuthCall(request));
+  }
 
-  DioException _staleRequest(RequestOptions req) => DioException(
-        requestOptions: req,
-        type: DioExceptionType.cancel,
-        error: 'Session changed',
-      );
+  DioException _staleRequest(RequestOptions request) {
+    return DioException(
+      requestOptions: request,
+      type: DioExceptionType.cancel,
+      error: 'Session changed',
+    );
+  }
 
-  /// Invalidate pending results immediately, before asynchronous cleanup.
+  /// يبطل الطلبات القديمة قبل بدء تنظيف التخزين بشكل غير متزامن.
   void invalidateSession() {
     _sessionGeneration++;
     _sessionBlocked = true;
@@ -190,10 +249,24 @@ class ApiClient {
     _refreshGeneration = null;
   }
 
-  /// Called only after a complete login or successful restoration.
+  /// يُستدعى بعد اكتمال تسجيل الدخول أو استعادة الجلسة بنجاح.
   void activateSession() {
     _sessionBlocked = false;
     _expiredNotified = false;
+  }
+
+  Future<void> _clearExpiredWithoutListener() async {
+    try {
+      await clearTokens();
+    } catch (_) {
+      // نتابع تنظيف بيانات الملف الشخصي حتى لو فشل حذف التوكنات.
+    }
+
+    try {
+      await SecureStorageService.instance.clearSession();
+    } catch (_) {
+      // قد يكون التخزين غير متاح مؤقتًا؛ تبقى الجلسة محجوبة في الذاكرة.
+    }
   }
 
   Future<T> _serializeStorage<T>(Future<T> Function() operation) {
@@ -201,65 +274,96 @@ class ApiClient {
     final result = previous == null
         ? Future<T>.sync(operation)
         : previous.then((_) => operation());
+
     late final Future<void> finished;
-    finished = result.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    finished = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
     _storageWrites = finished;
-    unawaited(finished.whenComplete(() {
-      if (identical(_storageWrites, finished)) _storageWrites = null;
-    }));
+
+    unawaited(
+      finished.whenComplete(() {
+        if (identical(_storageWrites, finished)) {
+          _storageWrites = null;
+        }
+      }),
+    );
+
     return result;
   }
 
   // ---------------- التوكنات والجلسة ----------------
 
-  /// [tokens] هو الكائن الراجع من الباك اند: {access: {token, expires}, refresh: {token, expires}}
-  Future<void> saveTokens(Map<String, dynamic> tokens,
-          {int? expectedGeneration}) =>
-      _serializeStorage(() async {
-        if (expectedGeneration != null &&
-            expectedGeneration != _sessionGeneration) {
-          return;
-        }
-        final access = tokens['access']?['token'];
-        final refresh = tokens['refresh']?['token'];
-        if (access != null) {
-          await _storage.write(key: _accessKey, value: access.toString());
-        }
-        if (refresh != null) {
-          await _storage.write(key: _refreshKey, value: refresh.toString());
-        }
-      });
+  /// شكل [tokens]:
+  /// {access: {token, expires}, refresh: {token, expires}}
+  Future<void> saveTokens(
+    Map<String, dynamic> tokens, {
+    int? expectedGeneration,
+  }) {
+    return _serializeStorage(() async {
+      if (expectedGeneration != null &&
+          expectedGeneration != _sessionGeneration) {
+        return;
+      }
+
+      final access = _nestedToken(tokens['access']);
+      final refresh = _nestedToken(tokens['refresh']);
+
+      if (access != null && access.isNotEmpty) {
+        await _storage.write(key: _accessKey, value: access);
+      }
+      if (refresh != null && refresh.isNotEmpty) {
+        await _storage.write(key: _refreshKey, value: refresh);
+      }
+    });
+  }
+
+  String? _nestedToken(dynamic value) {
+    if (value is Map) {
+      final token = value['token'];
+      return token?.toString();
+    }
+    return null;
+  }
 
   Future<String?> get refreshToken => _storage.read(key: _refreshKey);
 
-  Future<bool> hasToken() async =>
-      (await _storage.read(key: _accessKey)) != null;
+  Future<bool> hasToken() async {
+    final token = await _storage.read(key: _accessKey);
+    return token != null && token.isNotEmpty;
+  }
 
   Future<void> saveUserJson(String json) =>
       _storage.write(key: _userKey, value: json);
 
   Future<String?> readUserJson() => _storage.read(key: _userKey);
 
-  Future<void> clearTokens() => _serializeStorage(() async {
-        Object? firstError;
-        StackTrace? firstStack;
-        for (final key in [_accessKey, _refreshKey, _userKey]) {
-          try {
-            await _storage.delete(key: key);
-          } catch (error, stack) {
-            firstError ??= error;
-            firstStack ??= stack;
-          }
+  Future<void> clearTokens() {
+    return _serializeStorage(() async {
+      Object? firstError;
+      StackTrace? firstStack;
+
+      for (final key in [_accessKey, _refreshKey, _userKey]) {
+        try {
+          await _storage.delete(key: key);
+        } catch (error, stack) {
+          firstError ??= error;
+          firstStack ??= stack;
         }
-        if (firstError != null) {
-          Error.throwWithStackTrace(firstError, firstStack!);
-        }
-      });
+      }
+
+      if (firstError != null) {
+        Error.throwWithStackTrace(firstError, firstStack!);
+      }
+    });
+  }
 
   Future<bool> _refreshOnce(int generation, String? sentToken) {
     if (_refreshing != null && _refreshGeneration == generation) {
       return _refreshing!;
     }
+
     _refreshGeneration = generation;
     late final Future<bool> future;
     future = _refresh(generation, sentToken).whenComplete(() {
@@ -275,71 +379,118 @@ class ApiClient {
   Future<bool> _refresh(int generation, String? sentToken) async {
     try {
       final currentAccess = await _storage.read(key: _accessKey);
-      if (generation != _sessionGeneration || _sessionBlocked) return false;
+
+      if (generation != _sessionGeneration || _sessionBlocked) {
+        return false;
+      }
+
+      // طلب آخر سبق وجدد التوكن؛ لا نستخدم Refresh Token مرة ثانية.
       if (currentAccess != null &&
           sentToken != null &&
           sentToken != 'Bearer $currentAccess') {
         return true;
       }
+
       final refresh = await _storage.read(key: _refreshKey);
-      if (refresh == null || generation != _sessionGeneration) return false;
-      // Dio منفصل لتجنّب الدخول في حلقة مع الـ interceptor.
-      final res = await Dio(BaseOptions(
-        baseUrl: baseUrl,
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 20),
-      )).post('/auth/refresh-tokens', data: {'refreshToken': refresh});
-      if (generation != _sessionGeneration || _sessionBlocked) return false;
-      final tokens = Map<String, dynamic>.from(res.data as Map);
-      final access = tokens['access'];
-      final nextRefresh = tokens['refresh'];
-      if (access is! Map ||
-          nextRefresh is! Map ||
-          (access['token']?.toString().isEmpty ?? true) ||
-          (nextRefresh['token']?.toString().isEmpty ?? true)) {
+      if (refresh == null || refresh.isEmpty) {
+        return false;
+      }
+
+      // Dio مستقل لتجنب دخول طلب التجديد في interceptor نفسه.
+      final refreshDio = Dio(
+        BaseOptions(
+          baseUrl: baseUrl,
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 20),
+          headers: {'Content-Type': 'application/json'},
+        ),
+      );
+
+      final response = await refreshDio.post(
+        '/auth/refresh-tokens',
+        data: {'refreshToken': refresh},
+      );
+
+      if (generation != _sessionGeneration || _sessionBlocked) {
+        return false;
+      }
+
+      if (response.data is! Map) {
         throw DioException(
-          requestOptions: res.requestOptions,
-          response: res,
+          requestOptions: response.requestOptions,
+          response: response,
           type: DioExceptionType.badResponse,
           error: 'Invalid token refresh response',
         );
       }
+
+      final tokens = Map<String, dynamic>.from(response.data as Map);
+      final access = _nestedToken(tokens['access']);
+      final nextRefresh = _nestedToken(tokens['refresh']);
+
+      if (access == null ||
+          access.isEmpty ||
+          nextRefresh == null ||
+          nextRefresh.isEmpty) {
+        throw DioException(
+          requestOptions: response.requestOptions,
+          response: response,
+          type: DioExceptionType.badResponse,
+          error: 'Invalid token refresh response',
+        );
+      }
+
       await saveTokens(tokens, expectedGeneration: generation);
       return generation == _sessionGeneration && !_sessionBlocked;
     } on DioException catch (error) {
       final status = error.response?.statusCode;
-      if (status == 401 || status == 403) return false;
+
+      // 401/403 من endpoint التجديد يعنيان أن Refresh Token غير صالح.
+      if (status == 401 || status == 403) {
+        return false;
+      }
+
+      // أخطاء الشبكة والخادم لا تعني انتهاء الجلسة؛ دع الواجهة تعرض الخطأ.
       rethrow;
     }
   }
 
   // ---------------- معالجة الأخطاء ----------------
 
-  /// يلفّ أي طلب ويحوّل أخطاء Dio إلى [ApiException] برسالة مفهومة.
+  /// يلف أي طلب ويحوّل أخطاء Dio إلى [ApiException] مفهومة.
   static Future<T> guard<T>(Future<T> Function() fn) async {
     try {
       return await fn();
-    } on DioException catch (e) {
-      throw _toException(e);
+    } on DioException catch (error) {
+      throw _toException(error);
     }
   }
 
-  static ApiException _toException(DioException e) {
-    final status = e.response?.statusCode;
-    final data = e.response?.data;
+  static ApiException _toException(DioException error) {
+    final status = error.response?.statusCode;
+    final data = error.response?.data;
+
     if (data is Map && data['message'] != null) {
-      return ApiException(data['message'].toString(), statusCode: status);
+      return ApiException(
+        data['message'].toString(),
+        statusCode: status,
+      );
     }
-    switch (e.type) {
+
+    switch (error.type) {
       case DioExceptionType.connectionTimeout:
       case DioExceptionType.sendTimeout:
       case DioExceptionType.receiveTimeout:
       case DioExceptionType.connectionError:
         return ApiException(
-            'تعذّر الاتصال بالخادم، تحقق من الشبكة وعنوان الخادم',
-            statusCode: status);
+          'تعذّر الاتصال بالخادم، تحقق من الشبكة وعنوان الخادم',
+          statusCode: status,
+        );
       default:
-        return ApiException('حدث خطأ غير متوقع', statusCode: status);
+        return ApiException(
+          'حدث خطأ غير متوقع',
+          statusCode: status,
+        );
     }
   }
 }
