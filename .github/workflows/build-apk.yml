@@ -33,7 +33,15 @@ jobs:
             --split-debug-info=build/debug-info
       - name: Report APK sizes
         run: ls -lh build/app/outputs/flutter-apk/*.apk
+      - name: Run Flutter tests
+        run: |
+            flutter test \
+            --dart-define=API_BASE_URL=http://127.0.0.1:41899/v1
 
+      - name: Build release APK
+        run: |
+         flutter build apk --release \
+         --dart-define=API_BASE_URL=http://192.168.1.66:3000/v1
       - uses: actions/upload-artifact@v4
         with:
           name: release-apks
