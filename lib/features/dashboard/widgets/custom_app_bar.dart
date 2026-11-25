@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../auth/controller/auth_controller.dart';
+import '../../auth/providers/auth_provider.dart';
 import '../../auth/models/user_model.dart';
 import 'role_badge.dart';
 
@@ -38,7 +38,7 @@ class CustomAppBar extends StatelessWidget implements PreferredSizeWidget {
     );
 
     if (confirmed == true && context.mounted) {
-      context.read<AuthController>().logout();
+      context.read<AuthProvider>().logout();
       if (context.mounted) {
         Navigator.of(context).pushNamedAndRemoveUntil('/login', (_) => false);
       }

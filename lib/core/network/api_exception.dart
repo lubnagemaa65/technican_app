@@ -120,8 +120,7 @@ class ApiClient {
 
             final sentAuthorization =
                 request.headers['Authorization']?.toString();
-            final alreadyRefreshed =
-                currentAccessToken != null &&
+            final alreadyRefreshed = currentAccessToken != null &&
                 sentAuthorization != null &&
                 sentAuthorization != 'Bearer $currentAccessToken';
 
@@ -214,7 +213,12 @@ class ApiClient {
   static const String _generationKey = 'session_generation';
 
   // تبقى خيارات التخزين متوافقة مع الجلسات السابقة التي أنشأها ApiClient.
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final FlutterSecureStorage _storage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    iOptions: IOSOptions(
+      accessibility: KeychainAccessibility.first_unlock,
+    ),
+  );
   late final Dio dio;
 
   Future<bool>? _refreshing;
@@ -310,12 +314,22 @@ class ApiClient {
       final access = _nestedToken(tokens['access']);
       final refresh = _nestedToken(tokens['refresh']);
 
-      if (access != null && access.isNotEmpty) {
-        await _storage.write(key: _accessKey, value: access);
+      if (access == null ||
+          access.isEmpty ||
+          refresh == null ||
+          refresh.isEmpty) {
+        throw StateError('استجابة التوكنات ناقصة من الخادم.');
       }
-      if (refresh != null && refresh.isNotEmpty) {
-        await _storage.write(key: _refreshKey, value: refresh);
-      }
+
+      await _storage.write(
+        key: _accessKey,
+        value: access,
+      );
+
+      await _storage.write(
+        key: _refreshKey,
+        value: refresh,
+      );
     });
   }
 
@@ -324,14 +338,20 @@ class ApiClient {
       final token = value['token'];
       return token?.toString();
     }
+
     return null;
   }
 
   Future<String?> get refreshToken => _storage.read(key: _refreshKey);
 
   Future<bool> hasToken() async {
-    final token = await _storage.read(key: _accessKey);
-    return token != null && token.isNotEmpty;
+    final access = await _storage.read(key: _accessKey);
+    final refresh = await _storage.read(key: _refreshKey);
+
+    return access != null &&
+        access.isNotEmpty &&
+        refresh != null &&
+        refresh.isNotEmpty;
   }
 
   Future<void> saveUserJson(String json) =>

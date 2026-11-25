@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
-import '../../auth/controller/auth_controller.dart';
+import '../../auth/providers/auth_provider.dart';
 import '../../auth/models/user_model.dart';
 import 'role_badge.dart';
 
@@ -50,7 +50,7 @@ class AppDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final user = context.watch<AuthController>().currentUser;
+    final user = context.watch<AuthProvider>().currentUser;
 
     return Drawer(
       child: SafeArea(
@@ -124,7 +124,7 @@ class AppDrawer extends StatelessWidget {
               title: const Text('تسجيل الخروج',
                   style: TextStyle(color: AppColors.statusBroken)),
               onTap: () async {
-                context.read<AuthController>().logout();
+                context.read<AuthProvider>().logout();
                 if (context.mounted) {
                   Navigator.of(context)
                       .pushNamedAndRemoveUntil('/login', (_) => false);

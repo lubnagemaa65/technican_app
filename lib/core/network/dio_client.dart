@@ -32,40 +32,7 @@ Map<String, dynamic> _asMap(dynamic data) =>
     Map<String, dynamic>.from(data as Map);
 
 // ======================= المصادقة =======================
-class AuthService {
-  AuthService._();
 
-  static Future<UserModel> login(String email, String password) =>
-      ApiClient.guard(() async {
-        final res = await _d
-            .post('/auth/login', data: {'email': email, 'password': password});
-        final body = _asMap(res.data);
-        await ApiClient.instance.saveTokens(_asMap(body['tokens']));
-        final user = UserModel.fromJson(_asMap(body['user']));
-        await ApiClient.instance.saveUserJson(jsonEncode(user.toJson()));
-        return user;
-      });
-
-  /// يستعيد المستخدم المحفوظ عند فتح التطبيق (لا يوجد endpoint لـ /me في الباك اند).
-  static Future<UserModel?> currentUser() async {
-    if (!await ApiClient.instance.hasToken()) return null;
-    final raw = await ApiClient.instance.readUserJson();
-    if (raw == null) return null;
-    return UserModel.fromJson(_asMap(jsonDecode(raw)));
-  }
-
-  static Future<void> logout() async {
-    try {
-      final rt = await ApiClient.instance.refreshToken;
-      if (rt != null) await _d.post('/auth/logout', data: {'refreshToken': rt});
-    } catch (_) {
-      // نتجاهل أخطاء الشبكة عند تسجيل الخروج
-    }
-    await ApiClient.instance.clearTokens();
-  }
-}
-
-// ======================= المستخدمون =======================
 class UserService {
   UserService._();
 

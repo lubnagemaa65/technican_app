@@ -32,7 +32,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     if (!_formKey.currentState!.validate()) return;
 
     final auth = context.read<AuthProvider>();
-    final success = await auth.forgotPassword(email: _emailController.text.trim());
+    final success =
+        await auth.forgotPassword(email: _emailController.text.trim());
 
     if (!mounted) return;
 
@@ -62,15 +63,20 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             children: [
               const SizedBox(height: 16),
               Icon(
-                _sent ? Icons.mark_email_read_outlined : Icons.lock_reset_rounded,
+                _sent
+                    ? Icons.mark_email_read_outlined
+                    : Icons.lock_reset_rounded,
                 size: 64,
                 color: AppColors.primary,
               ),
               const SizedBox(height: 20),
               Text(
-                _sent ? context.tr('reset_link_sent') : context.tr('forgot_password_subtitle'),
+                _sent
+                    ? context.tr('reset_link_sent')
+                    : context.tr('forgot_password_subtitle'),
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: AppColors.textSecondary, fontSize: 15),
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 15),
               ),
               const SizedBox(height: 28),
               if (!_sent) ...[

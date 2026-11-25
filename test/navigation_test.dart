@@ -53,6 +53,7 @@ void main() {
       (tester) async {
     FlutterSecureStorage.setMockInitialValues({
       'access_token': 'fake-token',
+      'refresh_token': 'fake-refresh-token',
       'user_profile':
           '{"name":"Saved User","email":"saved@example.com","role":"employee","token":"fake-token"}',
     });

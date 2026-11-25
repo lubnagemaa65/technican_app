@@ -20,5 +20,9 @@ class AppUser {
   final UserRole role;
   final String? token;
 
-  const AppUser({required this.name, required this.email, required this.role, this.token});
+  const AppUser(
+      {required this.name,
+      required this.email,
+      required this.role,
+      this.token});
 }
