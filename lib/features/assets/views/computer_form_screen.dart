@@ -26,11 +26,13 @@ class _ComputerFormScreenState extends State<ComputerFormScreen> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _codeController;
   late final TextEditingController _processorController;
+  late final TextEditingController _motherboardController;
   late final TextEditingController _diskSizeController;
 
   late ComputerType _type;
   String? _diskType;
   String? _ram;
+  String? _graphicsCard;
   String? _collegeId;
   String? _employeeId;
   int _collegeFieldVersion = 0;
@@ -41,10 +43,12 @@ class _ComputerFormScreenState extends State<ComputerFormScreen> {
     final e = widget.existing;
     _codeController = TextEditingController(text: e?.code ?? '');
     _processorController = TextEditingController(text: e?.processor ?? '');
+    _motherboardController = TextEditingController(text: e?.motherboard ?? '');
     _diskSizeController = TextEditingController(text: e?.diskSize ?? '');
     _type = e?.type ?? ComputerType.desktop;
     _diskType = e?.diskType;
     _ram = e?.ram;
+    _graphicsCard = e?.graphicsCard;
     _collegeId = e?.collegeId;
     _employeeId = e?.employeeId;
 
@@ -61,6 +65,7 @@ class _ComputerFormScreenState extends State<ComputerFormScreen> {
   void dispose() {
     _codeController.dispose();
     _processorController.dispose();
+    _motherboardController.dispose();
     _diskSizeController.dispose();
     super.dispose();
   }
@@ -74,16 +79,8 @@ class _ComputerFormScreenState extends State<ComputerFormScreen> {
       ));
       return;
     }
-    if (!widget.isEditing) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text(
-            'تعذّر إنشاء الحاسوب: يتطلب الخادم اللوحة الأم وبطاقة الرسوميات، وهما غير متاحتين في هذا النموذج.'),
-        backgroundColor: AppColors.error,
-      ));
-      return;
-    }
     if (!_formKey.currentState!.validate()) return;
-    if (_collegeId != widget.existing!.collegeId) {
+    if (widget.isEditing && _collegeId != widget.existing!.collegeId) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content: Text(
@@ -96,11 +93,14 @@ class _ComputerFormScreenState extends State<ComputerFormScreen> {
     final provider = context.read<AssetsProvider>();
     final payload = {
       'type': _type == ComputerType.laptop ? 'laptop' : 'desktop',
+      if (!widget.isEditing) 'collegeId': _collegeId,
       if (_employeeId != widget.existing?.employeeId) 'employeeId': _employeeId,
       'processor': _processorController.text.trim(),
-      'diskType': _diskType,
-      'diskSize': _diskSizeController.text.trim(),
-      'ram': _ram,
+      'motherboard': _motherboardController.text.trim(),
+      'hardDiskType': _diskType,
+      'hardDiskSpace': _diskSizeController.text.trim(),
+      'ramType': _ram,
+      'graphicsCard': _graphicsCard,
     };
 
     final success = widget.isEditing
@@ -232,6 +232,33 @@ class _ComputerFormScreenState extends State<ComputerFormScreen> {
                 controller: _processorController,
                 label: 'المعالج (مثال: Core i5) *',
                 validator: (v) => Validators.required(v),
+              ),
+              const SizedBox(height: 14),
+              CustomTextField(
+                controller: _motherboardController,
+                label: 'اللوحة الأم *',
+                validator: (v) => Validators.required(v),
+              ),
+              const SizedBox(height: 14),
+              DropdownButtonFormField<String>(
+                initialValue: _graphicsCard,
+                decoration: const InputDecoration(
+                  labelText: 'بطاقة الرسوميات *',
+                ),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'INTEGRATED',
+                    child: Text('مدمجة'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'SEPARATE',
+                    child: Text('منفصلة'),
+                  ),
+                ],
+                validator: (v) => v == null || v.isEmpty
+                    ? 'يرجى اختيار بطاقة الرسوميات'
+                    : null,
+                onChanged: (v) => setState(() => _graphicsCard = v),
               ),
               const SizedBox(height: 14),
               DropdownButtonFormField<String>(

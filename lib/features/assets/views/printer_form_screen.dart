@@ -5,7 +5,6 @@ import '../../../core/widgets/custom_button.dart';
 import '../../../models/printer_model.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../colleges/providers/colleges_provider.dart';
-import '../../employees/providers/employees_provider.dart';
 import '../providers/assets_provider.dart';
 
 class PrinterFormScreen extends StatefulWidget {
@@ -23,8 +22,6 @@ class _PrinterFormScreenState extends State<PrinterFormScreen> {
   late final TextEditingController _codeController;
   String? _type;
   String? _collegeId;
-  String? _employeeId;
-  int _employeeFieldVersion = 0;
   int _collegeFieldVersion = 0;
 
   @override
@@ -34,14 +31,10 @@ class _PrinterFormScreenState extends State<PrinterFormScreen> {
     _codeController = TextEditingController(text: p?.code ?? '');
     _type = p?.type;
     _collegeId = p?.collegeId;
-    _employeeId = p?.employeeId;
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final colleges = context.read<CollegesProvider>();
       if (colleges.status == LoadStatus.initial) colleges.loadColleges();
-      final employees = context.read<EmployeesProvider>();
-      if (employees.status == LoadStatus.initial) employees.loadEmployees();
     });
   }
 
@@ -112,7 +105,6 @@ class _PrinterFormScreenState extends State<PrinterFormScreen> {
   Widget build(BuildContext context) {
     final assetsProvider = context.watch<AssetsProvider>();
     final collegesProvider = context.watch<CollegesProvider>();
-    final employeesProvider = context.watch<EmployeesProvider>();
     final collegeOptions = <String, String>{
       for (final c in collegesProvider.colleges) c.id: c.name,
       if (_collegeId != null &&
@@ -120,12 +112,6 @@ class _PrinterFormScreenState extends State<PrinterFormScreen> {
         _collegeId!: _collegeId == widget.existing?.collegeId
             ? widget.existing?.collegeName ?? _collegeId!
             : _collegeId!,
-    };
-    final employeeOptions = <String, String>{
-      for (final e in employeesProvider.employees) e.id: e.fullName,
-      if (_employeeId != null &&
-          !employeesProvider.employees.any((e) => e.id == _employeeId))
-        _employeeId!: widget.existing?.employeeName ?? _employeeId!,
     };
     final typeOptions = <String>{
       'ليزر',
@@ -182,24 +168,6 @@ class _PrinterFormScreenState extends State<PrinterFormScreen> {
                     return;
                   }
                   setState(() => _collegeId = v);
-                },
-              ),
-              const SizedBox(height: 14),
-              DropdownButtonFormField<String>(
-                key: ValueKey(_employeeFieldVersion),
-                initialValue: _employeeId,
-                decoration: const InputDecoration(
-                    labelText: 'الموظف المسؤول (اختياري)'),
-                items: employeeOptions.entries
-                    .map((e) =>
-                        DropdownMenuItem(value: e.key, child: Text(e.value)))
-                    .toList(),
-                onChanged: (_) {
-                  setState(() => _employeeFieldVersion++);
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('لا يدعم الخادم ربط الطابعة بموظف.'),
-                    backgroundColor: AppColors.error,
-                  ));
                 },
               ),
               const SizedBox(height: 28),
